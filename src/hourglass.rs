@@ -1,4 +1,4 @@
-use crate::resources::{HourglassConfig, HourglassShape, ShapeMode, TimerState};
+use crate::resources::{ColorMode, HourglassConfig, HourglassShape, ShapeMode, TimerState};
 use bevy::prelude::*;
 use bevy_hourglass::{
     BulbStyle, Hourglass, HourglassMeshBodyConfig, HourglassMeshBuilder, HourglassMeshPlatesConfig,
@@ -17,7 +17,8 @@ impl Plugin for HourglassPlugin {
                     update_hourglass_color,
                     update_hourglass_shape,
                     update_morphing_shape,
-                    update_hourglass_timer.after(update_morphing_shape),
+                    update_rainbow_hourglass,
+                    update_hourglass_timer.after(update_morphing_shape).after(update_rainbow_hourglass),
                     handle_hourglass_click,
                     handle_timer_start,
                 ),
@@ -455,7 +456,7 @@ fn update_morphing_shape(
     time: Res<Time>,
     query: Query<(Entity, &Hourglass, &DragState), With<MainHourglass>>,
 ) {
-    if config.shape_mode == ShapeMode::Morphing {
+    if config.shape_mode == ShapeMode::Morphing && config.color_mode != ColorMode::Rainbow {
         // Preserve current hourglass state and drag state
         let (
             _current_upper,
@@ -680,6 +681,104 @@ fn interpolate_neck_style(style1: &NeckStyle, style2: &NeckStyle, t: f32) -> Nec
             height: lerp_f32(*h1, *h2, t),
             curve_resolution: *r1,
         },
+    }
+}
+
+fn update_rainbow_hourglass(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<ColorMaterial>>,
+    config: Res<HourglassConfig>,
+    timer_state: Res<TimerState>,
+    time: Res<Time>,
+    query: Query<(Entity, &Hourglass, &DragState), With<MainHourglass>>,
+    mut last_rebuild_time: Local<f32>,
+) {
+    if config.color_mode == ColorMode::Rainbow {
+        // Rebuild the hourglass every 0.1 seconds to update sand splash particle colors
+        let rebuild_interval = 0.1;
+        if time.elapsed_secs() - *last_rebuild_time >= rebuild_interval {
+            // Preserve current hourglass state and drag state
+            let (
+                _current_upper,
+                _current_lower,
+                _current_running,
+                _current_remaining,
+                current_flipping,
+                current_drag_state,
+            ) = if let Ok((_, hourglass, drag_state)) = query.single() {
+                (
+                    hourglass.upper_chamber,
+                    hourglass.lower_chamber,
+                    hourglass.running,
+                    hourglass.remaining_time,
+                    hourglass.flipping,
+                    drag_state.clone(),
+                )
+            } else {
+                (
+                    0.0,
+                    1.0,
+                    timer_state.is_running,
+                    timer_state.remaining,
+                    false,
+                    DragState::new(),
+                )
+            };
+
+            // Don't interrupt the hourglass if it's currently flipping
+            if current_flipping {
+                return;
+            }
+
+            // Despawn the old hourglass
+            for (entity, _, _) in query.iter() {
+                commands.entity(entity).despawn();
+            }
+
+            // Calculate correct fill percentage based on timer state
+            // fill_percent 1.0 = top chamber full, 0.0 = bottom chamber full
+            let fill_percent = if timer_state.duration > 0.0 {
+                timer_state.remaining / timer_state.duration
+            } else {
+                1.0
+            };
+
+            // Spawn a new hourglass with the current rainbow color
+            let (body_config, plates_config) = if config.shape_mode == ShapeMode::Morphing {
+                // Use morphed shape configuration when both rainbow and morphing are active
+                let cycle_time = 8.0;
+                let t = (time.elapsed_secs() % cycle_time) / cycle_time;
+                get_morphed_shape_config(t)
+            } else {
+                get_main_shape_config(config.shape_type)
+            };
+
+            let entity = HourglassMeshBuilder::new(Transform::from_xyz(0.0, 0.0, 0.0))
+                .with_body(body_config)
+                .with_plates(plates_config)
+                .with_sand(HourglassMeshSandConfig {
+                    color: config.color,
+                    fill_percent,
+                    wall_offset: 4.0,
+                })
+                .with_sand_splash(SandSplashConfig {
+                    particle_color: config.color,
+                    splash_radius: 20.0,
+                    particle_size: 2.0,
+                    ..Default::default()
+                })
+                .with_timing(timer_state.duration)
+                .build(&mut commands, &mut meshes, &mut materials);
+
+            commands.entity(entity).insert((
+                MainHourglass,
+                current_drag_state, // Use the preserved drag state
+                Name::new("Main Hourglass"),
+            ));
+
+            *last_rebuild_time = time.elapsed_secs();
+        }
     }
 }
 
