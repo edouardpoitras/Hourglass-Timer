@@ -1,20 +1,21 @@
-use crate::resources::{HourglassConfig, HourglassShape, ShapeMode};
+use crate::resources::{HourglassConfig, HourglassShape, ShapeMode, TimerState};
 use crate::ui::ShapeRowMarker;
 use bevy::prelude::*;
 use bevy_hourglass::{Hourglass, HourglassMeshBuilder, HourglassMeshSandConfig};
 
-use crate::hourglass::get_mini_shape_config;
+use crate::hourglass::{get_mini_shape_config, MainHourglass};
 
 pub struct ShapePanelPlugin;
 
 impl Plugin for ShapePanelPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(PostStartup, (spawn_shape_buttons, spawn_morphing_button))
+        app.add_systems(PostStartup, (spawn_shape_buttons, spawn_morphing_button, spawn_flip_button))
             .add_systems(
                 Update,
                 (
                     handle_shape_button_clicks,
                     handle_morphing_button_clicks,
+                    handle_flip_button_clicks,
                     update_mini_hourglass_colors,
                     handle_hover_effects,
                     update_hourglass_layering,
@@ -31,6 +32,7 @@ fn handle_hover_effects(
     camera_query: Query<(&Camera, &GlobalTransform)>,
     mini_hourglass_query: Query<(Entity, &Transform, &ShapeButton), With<MiniHourglass>>,
     morphing_button_query: Query<(Entity, &Transform), (With<MorphingButton>, With<MiniHourglass>)>,
+    flip_button_query: Query<(Entity, &Transform), (With<FlipButton>, With<MiniHourglass>)>,
     hovered_query: Query<Entity, With<HoveredHourglass>>,
 ) {
     if let Ok(window) = windows.single() {
@@ -57,6 +59,19 @@ fn handle_hover_effects(
                     // Check if hovering over the morphing button
                     if currently_hovered.is_none() {
                         if let Ok((entity, transform)) = morphing_button_query.single() {
+                            let distance =
+                                world_position.distance(transform.translation.truncate());
+                            let detection_radius = 20.0 * transform.scale.x;
+
+                            if distance < detection_radius {
+                                currently_hovered = Some(entity);
+                            }
+                        }
+                    }
+
+                    // Check if hovering over the flip button
+                    if currently_hovered.is_none() {
+                        if let Ok((entity, transform)) = flip_button_query.single() {
                             let distance =
                                 world_position.distance(transform.translation.truncate());
                             let detection_radius = 20.0 * transform.scale.x;
@@ -98,7 +113,11 @@ fn update_hourglass_layering(
     )>,
     mut morphing_button_query: Query<
         (&mut Transform, &MiniHourglass, Option<&HoveredHourglass>),
-        (With<MorphingButton>, Without<ShapeButton>),
+        (With<MorphingButton>, Without<ShapeButton>, Without<FlipButton>),
+    >,
+    mut flip_button_query: Query<
+        (&mut Transform, &MiniHourglass, Option<&HoveredHourglass>),
+        (With<FlipButton>, Without<ShapeButton>, Without<MorphingButton>),
     >,
 ) {
     // Handle regular hourglass buttons
@@ -135,6 +154,26 @@ fn update_hourglass_layering(
         } else if config.shape_mode == ShapeMode::Morphing {
             // Selected state: slightly larger when morphing is active
             1.15
+        } else {
+            // Default state
+            1.0
+        };
+
+        // Apply scale
+        transform.scale = Vec3::splat(scale);
+
+        // Keep original position
+        transform.translation = base_position;
+    }
+
+    // Handle flip button
+    if let Ok((mut transform, mini_hourglass, hovered)) = flip_button_query.single_mut() {
+        let base_position = mini_hourglass.base_position;
+
+        // Visual effects with scaling only
+        let scale = if let Some(_hover_component) = hovered {
+            // Hovered state: larger scale
+            1.3
         } else {
             // Default state
             1.0
@@ -217,6 +256,9 @@ struct ShapeButton {
 
 #[derive(Component)]
 struct MorphingButton;
+
+#[derive(Component)]
+struct FlipButton;
 
 #[derive(Component)]
 struct MiniHourglass {
@@ -312,6 +354,42 @@ fn spawn_morphing_button(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>
     });
 }
 
+fn spawn_flip_button(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>) {
+    // Create the flip button as a 3D object positioned alongside the hourglasses
+    let x_offset = 150.0; // Position after the morphing button
+
+    // Start with a temporary position - will be updated by update_mini_hourglass_positions
+    let temp_position = Vec3::new(0.0, 0.0, 10.0);
+
+    // Create a simple rectangle background for the button
+    let button_entity = commands
+        .spawn((
+            Name::new("Flip Button 3D"),
+            FlipButton,
+            Mesh2d(meshes.add(Rectangle::new(30.0, 30.0))),
+            Transform::from_translation(temp_position),
+            MiniHourglass {
+                base_position: temp_position,
+                original_x: x_offset,
+            },
+        ))
+        .id();
+
+    // Create the flip icon (↕) text as a child entity
+    commands.entity(button_entity).with_children(|parent| {
+        parent.spawn((
+            Name::new("Flip Icon Text"),
+            Text2d::new("↕"),
+            TextColor(Color::WHITE),
+            TextFont {
+                font_size: 32.0,
+                ..default()
+            },
+            Transform::from_translation(Vec3::new(0.0, 0.0, 0.1)), // Slightly in front
+        ));
+    });
+}
+
 fn handle_morphing_button_clicks(
     mouse_input: Res<ButtonInput<MouseButton>>,
     windows: Query<&Window>,
@@ -341,6 +419,55 @@ fn handle_morphing_button_clicks(
                                     config.shape_mode = ShapeMode::Morphing;
                                 } else {
                                     config.shape_mode = ShapeMode::Static;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn handle_flip_button_clicks(
+    mouse_input: Res<ButtonInput<MouseButton>>,
+    windows: Query<&Window>,
+    camera_query: Query<(&Camera, &GlobalTransform)>,
+    flip_button_query: Query<&Transform, (With<FlipButton>, With<MiniHourglass>)>,
+    mut hourglass_query: Query<&mut Hourglass, With<MainHourglass>>,
+    mut timer_state: ResMut<TimerState>,
+) {
+    if mouse_input.just_pressed(MouseButton::Left) {
+        if let Ok(window) = windows.single() {
+            if let Some(cursor_position) = window.cursor_position() {
+                if let Ok((camera, camera_transform)) = camera_query.single() {
+                    // Convert screen coordinates to world coordinates
+                    if let Ok(world_position) =
+                        camera.viewport_to_world_2d(camera_transform, cursor_position)
+                    {
+                        // Check if click is near the flip button
+                        if let Ok(transform) = flip_button_query.single() {
+                            let distance =
+                                world_position.distance(transform.translation.truncate());
+
+                            // Adjust click detection radius based on current scale
+                            let click_radius = 20.0 * transform.scale.x;
+
+                            if distance < click_radius {
+                                // Flip the hourglass - same logic as drag gesture
+                                if let Ok(mut hourglass) = hourglass_query.single_mut() {
+                                    if hourglass.can_flip() {
+                                        // Immediately set chambers to initial state (all sand in bottom)
+                                        hourglass.upper_chamber = 0.0;
+                                        hourglass.lower_chamber = 1.0;
+
+                                        // Then trigger the flip animation
+                                        hourglass.flip();
+                                        timer_state.reset();
+
+                                        // Start the timer automatically after flip
+                                        timer_state.is_running = true;
+                                    }
                                 }
                             }
                         }
